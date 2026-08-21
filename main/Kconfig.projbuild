@@ -1,0 +1,24 @@
+menu "WiFi Configuration"
+
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID of the WiFi network to connect to.
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            Password of the WiFi network.
+endmenu
+
+menu "Server URL Configuration"
+
+    config SENSOR_SERVER_URL
+        string "Server URL"
+        default "server url"
+        help
+            Server URL to post data
+
+endmenu

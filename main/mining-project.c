@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -17,12 +18,29 @@ static const char *TAG = "MQ2";
 // We built a 10k/10k voltage divider so GPIO34 only sees half of the
 // MQ-2's actual AOUT voltage. Multiply readings by this to reconstruct
 // the real AOUT value.
-#define DIVIDER_FACTOR    2.0f
+#define DIVIDER_FACTOR          2.0f
+#define VCC                     5.0f    // Sensor is powered at 5V
+#define RL_VALUE_KOHM           5.0f    //Sensors on board load resistor (assume 5k ohm)
+
+#define RO_CLEAN_AIR_FACTOR     9.83f   //MQ-2 datasheet clean air factor Rs/Ro ration
+
+#define WARMUP_MS               60000   //Warmup the sensor once at start to let the sensor become stable
+#define CALIBRATION_SAMPLES     50      //Number of times to check reading and avg it in clean air for a baseline
+
+// Power-law regression constants per gas: ppm = a * (Rs/Ro)^b
+// Source: MQ-2 datasheet log-log curve fits (MQSensorsLib constants).
+// No distinct "Smoke" curve is commonly published for MQ-2 - it's
+// approximated here with the LPG curve, since the two lines sit close
+// together on the datasheet graph. Treat as an estimate, not exact.
+#define SMOKE_A                 574.25f
+#define SMOKE_B                 -2.222f
+
 
 /* -------------------- Globals -------------------- */
 static adc_oneshot_unit_handle_t adc_handle;
 static adc_cali_handle_t cali_handle = NULL;
 static bool have_calibration = false;
+static float Ro = 10.0f; //Overwritten by calibrate_ro()
 
 /* -------------------- ADC Setup -------------------- */
 static void adc_init(void){
@@ -57,7 +75,7 @@ static void adc_init(void){
     }
 }
 
-/* -------------------- Reading -------------------- */
+/* -------------------- Reading + math-------------------- */
 // Returns the ACTUAL AOUT voltage at the sensor, after undoing the voltage divider.
 static float read_aout_voltage(void){
     int raw = 0;
@@ -77,17 +95,52 @@ static float read_aout_voltage(void){
     return v_aout;
 }
 
+//Rs = ((VCC - Vout) / Vout) * RL
+static float compute_rs(float v_out){
+    if(v_out <= 0.01f) v_out = 0.01f; // guard agaisnt divide by zero
+    return ((VCC - v_out) / v_out) * RL_VALUE_KOHM;
+}
+
+//Generic power-law converter, reused for every gas: ppm = a * ratio^b
+static float compute_ppm(float ratio, float a, float b){
+    if(ratio <= 0.0f) ratio = 0.01f;
+    return a * powf(ratio, b);
+}
+
+static void calibrate_ro(void){
+    ESP_LOGI(TAG, "Calibrating Ro in clean air (%d samples)", CALIBRATION_SAMPLES);
+    float rs_sum = 0.0f;
+
+    for(int i = 0; i < CALIBRATION_SAMPLES; i++){
+        rs_sum += compute_rs(read_aout_voltage());
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    float rs_avg = rs_sum / CALIBRATION_SAMPLES;
+    Ro = rs_avg / RO_CLEAN_AIR_FACTOR;
+    ESP_LOGI(TAG, "Calibration done. Ro = %.2f kOhm", Ro);
+}
+
 /* -------------------- Main -------------------- */
 
 void app_main(void)
 {
     adc_init();
-    ESP_LOGI(TAG, "ADC + calibration initialized, starting voltage reads...");
+
+    ESP_LOGI(TAG, "Warming up (%d s)... keep sensor in clean air for calibration.", WARMUP_MS / 1000);
+    vTaskDelay(pdMS_TO_TICKS(WARMUP_MS));
+
+    calibrate_ro();
 
     while(1){
         float v_aout = read_aout_voltage();
-        printf("AOUT Voltage: %.3f V\n", v_aout);
+        float rs = compute_rs(v_aout);
+        float ratio = rs / Ro;
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        float smoke_ppm = compute_ppm(ratio, SMOKE_A, SMOKE_B);
+
+        printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm", v_aout, rs, Ro, ratio, smoke_ppm);
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
