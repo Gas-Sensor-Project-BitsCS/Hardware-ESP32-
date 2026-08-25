@@ -7,6 +7,9 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 
+#include "wifi_connect.h"
+#include "http_client.h"
+
 static const char *TAG = "MQ2";
 
 /* -------------------- Configuration -------------------- */
@@ -34,6 +37,10 @@ static const char *TAG = "MQ2";
 // together on the datasheet graph. Treat as an estimate, not exact.
 #define SMOKE_A                 574.25f
 #define SMOKE_B                 -2.222f
+
+// Dummy placeholders until the temperature/humidity sensor is wired up.
+#define DUMMY_TEMPERATURE_C      30.0f
+#define DUMMY_HUMIDITY_PCT       60.0f
 
 
 /* -------------------- Globals -------------------- */
@@ -127,6 +134,12 @@ void app_main(void)
 {
     adc_init();
 
+    // Connect to Wi-Fi before we do anything that needs the network.
+    // This blocks until connected (or gives up after a few retries).
+    if (wifi_connect_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi connection failed, sensor readings will not be sent");
+    }
+
     ESP_LOGI(TAG, "Warming up (%d s)... keep sensor in clean air for calibration.", WARMUP_MS / 1000);
     vTaskDelay(pdMS_TO_TICKS(WARMUP_MS));
 
@@ -141,6 +154,13 @@ void app_main(void)
 
         printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm", v_aout, rs, Ro, ratio, smoke_ppm);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Send this reading to the backend. Temperature/humidity are dummy
+        // values until that sensor is wired up.
+        esp_err_t send_err = send_sensor_reading(smoke_ppm, DUMMY_TEMPERATURE_C, DUMMY_HUMIDITY_PCT);
+        if (send_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to send reading to server");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
