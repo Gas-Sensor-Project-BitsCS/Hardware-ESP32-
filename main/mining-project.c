@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <math.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
+#include "driver/gpio.h"
 
 #include "wifi_connect.h"
 #include "http_client.h"
@@ -27,7 +29,7 @@ static const char *TAG = "MQ2";
 
 #define RO_CLEAN_AIR_FACTOR     9.83f   //MQ-2 datasheet clean air factor Rs/Ro ration
 
-#define WARMUP_MS               60000   //Warmup the sensor once at start to let the sensor become stable
+#define WARMUP_MS               6000    //Warmup the sensor once at start to let the sensor become stable (reduced to 6s for quick testing)
 #define CALIBRATION_SAMPLES     50      //Number of times to check reading and avg it in clean air for a baseline
 
 // Power-law regression constants per gas: ppm = a * (Rs/Ro)^b
@@ -42,12 +44,35 @@ static const char *TAG = "MQ2";
 #define DUMMY_TEMPERATURE_C      30.0f
 #define DUMMY_HUMIDITY_PCT       60.0f
 
+/* -------------------- Alert config (Phase 2, hardcoded) -------------------- */
+#define LED_GPIO                 GPIO_NUM_25
+#define BUZZER_GPIO              GPIO_NUM_26
+
+#define GAS_THRESHOLD_PPM_ON      5.0f   // trigger alert above this
+#define GAS_THRESHOLD_PPM_OFF     4.0f   // clear alert below this (hysteresis)
+
 
 /* -------------------- Globals -------------------- */
 static adc_oneshot_unit_handle_t adc_handle;
 static adc_cali_handle_t cali_handle = NULL;
 static bool have_calibration = false;
 static float Ro = 10.0f; //Overwritten by calibrate_ro()
+
+static bool alert_active = false;
+
+static void update_alert(float smoke_ppm){
+    if (!alert_active && smoke_ppm >= GAS_THRESHOLD_PPM_ON) {
+        alert_active = true;
+        ESP_LOGW(TAG, "ALERT: smoke_ppm=%.1f crossed ON threshold (%.1f)", smoke_ppm, GAS_THRESHOLD_PPM_ON);
+    } else if (alert_active && smoke_ppm <= GAS_THRESHOLD_PPM_OFF) {
+        alert_active = false;
+        ESP_LOGI(TAG, "Alert cleared: smoke_ppm=%.1f dropped below OFF threshold (%.1f)", smoke_ppm, GAS_THRESHOLD_PPM_OFF);
+    }
+    // else: stay in whatever state we were already in (this is the hysteresis band)
+
+    gpio_set_level(LED_GPIO, alert_active ? 1 : 0);
+    gpio_set_level(BUZZER_GPIO, alert_active ? 1 : 0);
+}
 
 /* -------------------- ADC Setup -------------------- */
 static void adc_init(void){
@@ -128,11 +153,29 @@ static void calibrate_ro(void){
     ESP_LOGI(TAG, "Calibration done. Ro = %.2f kOhm", Ro);
 }
 
+/* -------------------- GPIO(Buzzer + LED) Setup -------------------- */
+
+static void alert_gpio_init(void){
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << LED_GPIO) | (1ULL << BUZZER_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    // Start in a known "off" state
+    gpio_set_level(LED_GPIO, 0);
+    gpio_set_level(BUZZER_GPIO, 0);
+}
+
 /* -------------------- Main -------------------- */
 
 void app_main(void)
 {
     adc_init();
+    alert_gpio_init();
 
     // Connect to Wi-Fi before we do anything that needs the network.
     // This blocks until connected (or gives up after a few retries).
@@ -152,7 +195,9 @@ void app_main(void)
 
         float smoke_ppm = compute_ppm(ratio, SMOKE_A, SMOKE_B);
 
-        printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm", v_aout, rs, Ro, ratio, smoke_ppm);
+        update_alert(smoke_ppm);
+
+        printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm\n", v_aout, rs, Ro, ratio, smoke_ppm);
 
         // Send this reading to the backend. Temperature/humidity are dummy
         // values until that sensor is wired up.
