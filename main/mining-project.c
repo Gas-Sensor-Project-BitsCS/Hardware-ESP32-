@@ -29,7 +29,7 @@ static const char *TAG = "MQ2";
 
 #define RO_CLEAN_AIR_FACTOR     9.83f   //MQ-2 datasheet clean air factor Rs/Ro ration
 
-#define WARMUP_MS               6000    //Warmup the sensor once at start to let the sensor become stable (reduced to 6s for quick testing)
+#define WARMUP_MS               60000   //Warmup the sensor once at start to let the sensor become stable (reduced to 6s for quick testing)
 #define CALIBRATION_SAMPLES     50      //Number of times to check reading and avg it in clean air for a baseline
 
 // Power-law regression constants per gas: ppm = a * (Rs/Ro)^b
@@ -48,8 +48,8 @@ static const char *TAG = "MQ2";
 #define LED_GPIO                 GPIO_NUM_25
 #define BUZZER_GPIO              GPIO_NUM_26
 
-#define GAS_THRESHOLD_PPM_ON      5.0f   // trigger alert above this
-#define GAS_THRESHOLD_PPM_OFF     4.0f   // clear alert below this (hysteresis)
+#define GAS_THRESHOLD_PPM_ON      25.0f   // trigger alert above this
+#define GAS_THRESHOLD_PPM_OFF     20.0f   // clear alert below this (hysteresis)
 
 
 /* -------------------- Globals -------------------- */
