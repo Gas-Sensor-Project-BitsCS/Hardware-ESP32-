@@ -208,6 +208,13 @@ void app_main(void)
         float humidity_pct = DUMMY_HUMIDITY_PCT;
         
         DHT11_Status_t dht_status = DHT11_ReadData(&dht_data);
+
+        if (dht_status != DHT11_OK) {
+             ESP_LOGW(TAG, "DHT11 read failed (status=%d), retrying once", dht_status);
+            vTaskDelay(pdMS_TO_TICKS(50));   // brief pause lets the line settle before retry
+            dht_status = DHT11_ReadData(&dht_data);
+        }
+
         if (dht_status == DHT11_OK) {
             temperature_c = (float)dht_data.temperature;
             humidity_pct = (float)dht_data.humidity;
