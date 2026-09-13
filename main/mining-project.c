@@ -11,6 +11,7 @@
 
 #include "wifi_connect.h"
 #include "http_client.h"
+#include "dht11.h"
 
 static const char *TAG = "MQ2";
 
@@ -176,6 +177,7 @@ void app_main(void)
 {
     adc_init();
     alert_gpio_init();
+    DHT11_Init();
 
     // Connect to Wi-Fi before we do anything that needs the network.
     // This blocks until connected (or gives up after a few retries).
@@ -201,7 +203,20 @@ void app_main(void)
 
         // Send this reading to the backend. Temperature/humidity are dummy
         // values until that sensor is wired up.
-        esp_err_t send_err = send_sensor_reading(smoke_ppm, DUMMY_TEMPERATURE_C, DUMMY_HUMIDITY_PCT);
+        DHT11_Data_t dht_data;
+        float temperature_c = DUMMY_TEMPERATURE_C;
+        float humidity_pct = DUMMY_HUMIDITY_PCT;
+        
+        DHT11_Status_t dht_status = DHT11_ReadData(&dht_data);
+        if (dht_status == DHT11_OK) {
+            temperature_c = (float)dht_data.temperature;
+            humidity_pct = (float)dht_data.humidity;
+            printf("Temperature: %.2f Humidity: %.2f", temperature_c, humidity_pct);
+        } else {
+            ESP_LOGW(TAG, "DHT11 read failed (status=%d), sending last known dummy values", dht_status);
+        }        
+
+        esp_err_t send_err = send_sensor_reading(smoke_ppm, temperature_c, humidity_pct);
         if (send_err != ESP_OK) {
             ESP_LOGW(TAG, "Failed to send reading to server");
         }

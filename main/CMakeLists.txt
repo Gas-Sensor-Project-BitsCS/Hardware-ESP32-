@@ -2,9 +2,11 @@ idf_component_register(SRCS
                         "mining-project.c"
                         "wifi_connect/wifi_connect.c"
                         "http_client/http_client.c"
+                        "dht11/dht11.c"
                     INCLUDE_DIRS "."
                                  "wifi_connect"
                                  "http_client"
+                                 "dht11"
                     REQUIRES
                         esp_adc
                         esp_wifi
@@ -14,4 +16,5 @@ idf_component_register(SRCS
                         esp_http_client
                         json
                         driver
+                        esp_timer
                     )
