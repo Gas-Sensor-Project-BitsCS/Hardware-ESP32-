@@ -8,6 +8,10 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
+#include <stdbool.h>
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_heap_caps.h"
 
 #include "wifi_connect.h"
 #include "http_client.h"
@@ -49,8 +53,40 @@ static const char *TAG = "MQ2";
 #define LED_GPIO                 GPIO_NUM_25
 #define BUZZER_GPIO              GPIO_NUM_26
 
-#define GAS_THRESHOLD_PPM_ON      25.0f   // trigger alert above this
-#define GAS_THRESHOLD_PPM_OFF     20.0f   // clear alert below this (hysteresis)
+#define GAS_THRESHOLD_PPM_ON      250.0f   // trigger alert above this
+#define GAS_THRESHOLD_PPM_OFF     200.0f   // clear alert below this (hysteresis)
+
+/* -------------------- NVS Config (Ro persistence, Phase 3) -------------------- */
+#define NVS_NAMESPACE   "mq2_cal"
+#define NVS_KEY_RO      "ro_value"
+
+static esp_err_t load_ro_from_nvs(float *ro_out){
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;   // ESP_ERR_NVS_NOT_FOUND on first-ever boot, that's expected
+    }
+
+    size_t size = sizeof(float);
+    err = nvs_get_blob(handle, NVS_KEY_RO, ro_out, &size);
+    nvs_close(handle);
+    return err;
+}
+
+static esp_err_t save_ro_to_nvs(float ro_in){
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_blob(handle, NVS_KEY_RO, &ro_in, sizeof(float));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
 
 
 /* -------------------- Globals -------------------- */
@@ -154,6 +190,20 @@ static void calibrate_ro(void){
     ESP_LOGI(TAG, "Calibration done. Ro = %.2f kOhm", Ro);
 }
 
+/* -------------------- RAM Usage -------------------- */
+static void print_memory_usage(void){
+    size_t free_heap     = esp_get_free_heap_size();
+    size_t min_free_heap  = esp_get_minimum_free_heap_size();
+    size_t total_heap    = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
+    size_t used_heap     = total_heap - free_heap;
+
+    ESP_LOGI(TAG, "---- RAM usage ----");
+    ESP_LOGI(TAG, "Total heap:          %u bytes (%.1f KB)", (unsigned)total_heap, total_heap / 1024.0f);
+    ESP_LOGI(TAG, "Used heap (now):     %u bytes (%.1f KB)", (unsigned)used_heap, used_heap / 1024.0f);
+    ESP_LOGI(TAG, "Free heap (now):     %u bytes (%.1f KB)", (unsigned)free_heap, free_heap / 1024.0f);
+    ESP_LOGI(TAG, "Min free heap ever:  %u bytes (%.1f KB)", (unsigned)min_free_heap, min_free_heap / 1024.0f);
+}
+
 /* -------------------- GPIO(Buzzer + LED) Setup -------------------- */
 
 static void alert_gpio_init(void){
@@ -179,16 +229,36 @@ void app_main(void)
     alert_gpio_init();
     DHT11_Init();
 
+    
+    float last_known_temp = 0.00;
+    float last_known_humidity = 0.00;
     // Connect to Wi-Fi before we do anything that needs the network.
     // This blocks until connected (or gives up after a few retries).
     if (wifi_connect_init() != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi connection failed, sensor readings will not be sent");
     }
 
-    ESP_LOGI(TAG, "Warming up (%d s)... keep sensor in clean air for calibration.", WARMUP_MS / 1000);
-    vTaskDelay(pdMS_TO_TICKS(WARMUP_MS));
+    bool ro_loaded = false;
 
-    calibrate_ro();
+    #if CONFIG_MQ2_LOAD_RO_FROM_NVS
+    if (load_ro_from_nvs(&Ro) == ESP_OK) {
+        ro_loaded = true;
+        ESP_LOGI(TAG, "Loaded saved Ro = %.2f kOhm from NVS, skipping calibration", Ro);
+    } else {
+        ESP_LOGI(TAG, "NVS calibration enabled but no saved value found yet");
+    }
+    #else
+    ESP_LOGI(TAG, "NVS calibration disabled in menuconfig, forcing fresh calibration");
+    #endif
+
+    if (!ro_loaded) {
+        ESP_LOGI(TAG, "Warming up (%d s)... keep sensor in clean air.", WARMUP_MS / 1000);
+        vTaskDelay(pdMS_TO_TICKS(WARMUP_MS));
+        calibrate_ro();
+        save_ro_to_nvs(Ro);
+    }
+
+    print_memory_usage();   
 
     while(1){
         float v_aout = read_aout_voltage();
@@ -199,13 +269,12 @@ void app_main(void)
 
         update_alert(smoke_ppm);
 
-        printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm\n", v_aout, rs, Ro, ratio, smoke_ppm);
-
         // Send this reading to the backend. Temperature/humidity are dummy
         // values until that sensor is wired up.
         DHT11_Data_t dht_data;
-        float temperature_c = DUMMY_TEMPERATURE_C;
-        float humidity_pct = DUMMY_HUMIDITY_PCT;
+
+        float temperature_c = last_known_temp;
+        float humidity_pct = last_known_humidity;
         
         DHT11_Status_t dht_status = DHT11_ReadData(&dht_data);
 
@@ -218,10 +287,16 @@ void app_main(void)
         if (dht_status == DHT11_OK) {
             temperature_c = (float)dht_data.temperature;
             humidity_pct = (float)dht_data.humidity;
-            printf("Temperature: %.2f Humidity: %.2f", temperature_c, humidity_pct);
+
+            last_known_temp = (float)dht_data.temperature;
+            last_known_humidity  = (float)dht_data.humidity;
         } else {
             ESP_LOGW(TAG, "DHT11 read failed (status=%d), sending last known dummy values", dht_status);
-        }        
+        }
+
+        // Single combined line - always prints, gas reading never depends on DHT11 status
+        printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm | Temp:%.1fC Hum:%.1f%%\n",
+            v_aout, rs, Ro, ratio, smoke_ppm, temperature_c, humidity_pct);
 
         esp_err_t send_err = send_sensor_reading(smoke_ppm, temperature_c, humidity_pct);
         if (send_err != ESP_OK) {

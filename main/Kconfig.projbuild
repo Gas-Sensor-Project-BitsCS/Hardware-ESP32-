@@ -22,3 +22,18 @@ menu "Server URL Configuration"
             Server URL to post data
 
 endmenu
+
+menu "Mining Project Configuration"
+
+    config MQ2_LOAD_RO_FROM_NVS
+        bool "Load MQ-2 Ro calibration from NVS on boot"
+        default y
+        help
+            If enabled, the firmware loads a previously saved Ro calibration
+            value from NVS on startup and skips the warmup/calibration routine.
+            Disable this to force a fresh clean-air calibration on every boot
+            (e.g. after moving the sensor to a new location, or if you suspect
+            drift). Even when disabled, a fresh calibration is still saved to
+            NVS afterward, so re-enabling this later picks up the latest value.
+
+ endmenu

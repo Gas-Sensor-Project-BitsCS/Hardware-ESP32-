@@ -37,6 +37,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 esp_err_t send_sensor_reading(float gas_value, float temperature, float humidity)
 {
     cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "device_uid", "ESP32-001");
     cJSON_AddNumberToObject(root, "gas_value", gas_value);
     cJSON_AddNumberToObject(root, "temperature", temperature);
     cJSON_AddNumberToObject(root, "humidity", humidity);
