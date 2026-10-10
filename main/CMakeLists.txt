@@ -3,10 +3,12 @@ idf_component_register(SRCS
                         "wifi_connect/wifi_connect.c"
                         "http_client/http_client.c"
                         "dht11/dht11.c"
+                        "lcd/lcd.c"
                     INCLUDE_DIRS "."
                                  "wifi_connect"
                                  "http_client"
                                  "dht11"
+                                 "lcd"
                     REQUIRES
                         esp_adc
                         esp_wifi

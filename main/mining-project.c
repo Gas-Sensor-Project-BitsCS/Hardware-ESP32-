@@ -12,10 +12,12 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_heap_caps.h"
+#include "driver/i2c_master.h"
 
 #include "wifi_connect.h"
 #include "http_client.h"
 #include "dht11.h"
+#include "lcd.h"
 
 static const char *TAG = "MQ2";
 
@@ -48,6 +50,9 @@ static const char *TAG = "MQ2";
 // Dummy placeholders until the temperature/humidity sensor is wired up.
 #define DUMMY_TEMPERATURE_C      30.0f
 #define DUMMY_HUMIDITY_PCT       60.0f
+
+// Flame Sensor
+#define FLAME_ADC_CHANNEL   ADC_CHANNEL_4   // GPIO32
 
 /* -------------------- Alert config (Phase 2, hardcoded) -------------------- */
 #define LED_GPIO                 GPIO_NUM_25
@@ -97,6 +102,8 @@ static float Ro = 10.0f; //Overwritten by calibrate_ro()
 
 static bool alert_active = false;
 
+static i2c_master_bus_handle_t i2c_bus;
+
 static void update_alert(float smoke_ppm){
     if (!alert_active && smoke_ppm >= GAS_THRESHOLD_PPM_ON) {
         alert_active = true;
@@ -142,6 +149,30 @@ static void adc_init(void){
         // combo doesn't support the calibration scheme.
         ESP_LOGW(TAG, "ADC Calibration scheme unavailable, using raw linear math");
     }
+
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, FLAME_ADC_CHANNEL, &chan_cfg));
+}
+
+/* -------------------- I2C and LCD setup -------------------- */
+
+static void i2c_bus_init(void){
+    i2c_master_bus_config_t cfg = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = GPIO_NUM_21,
+        .scl_io_num = GPIO_NUM_22,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&cfg, &i2c_bus));
+}
+
+// Pads to 16 chars so old text is overwritten without a flickery LCD_Clear()
+static void lcd_line(uint8_t row, const char *text){
+    char buf[LCD_COLS + 1];
+    snprintf(buf, sizeof(buf), "%-*s", LCD_COLS, text);
+    LCD_SetCursor(row, 0);
+    LCD_Print(buf);
 }
 
 /* -------------------- Reading + math-------------------- */
@@ -190,6 +221,18 @@ static void calibrate_ro(void){
     ESP_LOGI(TAG, "Calibration done. Ro = %.2f kOhm", Ro);
 }
 
+/* -------------------- FLAME Sensor Readings -------------------- */
+static int read_flame_mv(void){
+    int raw = 0, mv = 0;
+    ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, FLAME_ADC_CHANNEL, &raw));
+    if (have_calibration) {
+        ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali_handle, raw, &mv));
+    } else {
+        mv = (int)((raw / 4095.0f) * 3300.0f);
+    }
+    return mv;
+}
+
 /* -------------------- RAM Usage -------------------- */
 static void print_memory_usage(void){
     size_t free_heap     = esp_get_free_heap_size();
@@ -228,6 +271,22 @@ void app_main(void)
     adc_init();
     alert_gpio_init();
     DHT11_Init();
+    i2c_bus_init();
+    
+    //LCD Display
+    if (LCD_Init(i2c_bus) == LCD_OK) {
+        lcd_line(0, "IOTronics Gas");
+        lcd_line(1, "Starting...");
+    } else {
+        ESP_LOGW(TAG, "LCD not found, continuing without display");
+    }
+
+    for (int i = 0; i < 3; i++) {
+    LCD_Backlight(0);
+    vTaskDelay(pdMS_TO_TICKS(400));
+    LCD_Backlight(1);
+    vTaskDelay(pdMS_TO_TICKS(400));
+}
 
     
     float last_known_temp = 0.00;
@@ -294,9 +353,29 @@ void app_main(void)
             ESP_LOGW(TAG, "DHT11 read failed (status=%d), sending last known dummy values", dht_status);
         }
 
+        char l0[17], l1[17];
+        snprintf(l0, sizeof(l0), "Smoke:%7.1fppm", smoke_ppm);
+        snprintf(l1, sizeof(l1), "T:%2.0fC H:%2.0f%% %-4s", temperature_c, humidity_pct,
+                 alert_active ? "ALRT" : "OK");
+        lcd_line(0, l0);
+        lcd_line(1, l1);
+
         // Single combined line - always prints, gas reading never depends on DHT11 status
         printf("\nAOUT:%.3fV Rs:%.2fk Ro:%.2fk Rs/Ro:%.2f | Smoke:%.1f ppm | Temp:%.1fC Hum:%.1f%%\n",
             v_aout, rs, Ro, ratio, smoke_ppm, temperature_c, humidity_pct);
+
+        // ESP_LOGI(TAG, "Flame sensor: %d mV", read_flame_mv());
+
+        int fmin = 3300, fmax = 0;
+        
+        for (int i = 0; i < 64; i++) {
+            int mv = read_flame_mv();
+            if (mv < fmin) fmin = mv;
+            if (mv > fmax) fmax = mv;
+            vTaskDelay(pdMS_TO_TICKS(10));   // ~100 Hz sampling
+        }
+        
+        ESP_LOGI(TAG, "Flame: min=%d max=%d p2p=%d mV", fmin, fmax, fmax - fmin);
 
         esp_err_t send_err = send_sensor_reading(smoke_ppm, temperature_c, humidity_pct);
         if (send_err != ESP_OK) {
